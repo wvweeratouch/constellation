@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Constellation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #050510; color: #ccc; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; height: 100vh; }
+
+#startScreen {
+  position: fixed; inset: 0; z-index: 100; background: #050510;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+#startScreen span { font-size: 1.6rem; color: #d4af37; letter-spacing: 0.1em; }
+
+#controls {
+  display: none; height: 42px; background: #0a0a12; border-bottom: 1px solid #1a1a2e;
+  padding: 0 12px; align-items: center; gap: 10px; overflow-x: auto; white-space: nowrap;
+  font-size: 11px;
+}
+#controls label { display: inline-flex; align-items: center; gap: 3px; color: #999; }
+#controls input[type=range] { width: 60px; accent-color: #668; }
+#controls select { background: #1a1a2e; color: #ccc; border: 1px solid #333; border-radius: 3px; padding: 1px 4px; font-size: 11px; }
+#controls input[type=color] { width: 24px; height: 20px; border: 1px solid #333; background: none; cursor: pointer; padding: 0; }
+#controls button {
+  background: #1a1a2e; color: #ccc; border: 1px solid #333; border-radius: 3px;
+  padding: 2px 8px; font-size: 11px; cursor: pointer;
+}
+#controls button:hover { background: #224; }
+#controls button.active { background: #224; border-color: #668; color: #d4af37; }
+.val { color: #d4af37; min-width: 24px; display: inline-block; text-align: right; }
+
+#main { display: none; height: calc(100vh - 42px); }
+#monitor { width: 35%; height: 100%; position: relative; background: #0a0a12; border-right: 1px solid #1a1a2e; }
+#monitor video { width: 100%; height: 100%; object-fit: contain; opacity: 0.5; }
+#monitorCanvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+#visual { width: 65%; height: 100%; position: relative; }
+#visCanvas { width: 100%; height: 100%; display: block; }
+
+#snapOverlay {
+  display: none; position: absolute; inset: 0; z-index: 10;
+  background: rgba(0,0,0,0.6); flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+}
+#snapOverlay button {
+  background: #1a1a2e; color: #d4af37; border: 1px solid #d4af37; border-radius: 4px;
+  padding: 8px 20px; font-size: 14px; cursor: pointer;
+}
+#snapOverlay button:hover { background: #224; }
+#countdown {
+  position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+  font-size: 120px; color: #d4af37; z-index: 5; pointer-events: none;
+  text-shadow: 0 0 40px rgba(212,175,55,0.5);
+}
+</style>
+</head>
+<body>
+
+<div id="startScreen"><span>click to start</span></div>
+
+<div id="controls">
+  <label>Persons <select id="numPoses"><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option></select></label>
+  <label>Hold <input type="range" id="hold" min="0.5" max="5" step="0.1" value="2"><span class="val" id="holdV">2.0</span></label>
+  <label>Fade <input type="range" id="fade" min="0.3" max="2" step="0.1" value="0.8"><span class="val" id="fadeV">0.8</span></label>
+  <label>PtMin <input type="range" id="ptMin" min="3" max="20" step="1" value="3"><span class="val" id="ptMinV">3</span></label>
+  <label>PtMax <input type="range" id="ptMax" min="3" max="20" step="1" value="10"><span class="val" id="ptMaxV">10</span></label>
+  <label>ConnMax <input type="range" id="connMax" min="1" max="5" step="1" value="3"><span class="val" id="connMaxV">3</span></label>
+  <label>ConnDist <input type="range" id="connDist" min="0.1" max="0.5" step="0.01" value="0.3"><span class="val" id="connDistV">0.30</span></label>
+  <label>Color <input type="color" id="color" value="#d4af37"></label>
+  <label>Trail <input type="range" id="trail" min="0.01" max="0.3" step="0.01" value="0.15"><span class="val" id="trailV">0.15</span></label>
+  <label>PoseT <input type="range" id="poseT" min="0.01" max="0.20" step="0.01" value="0.05"><span class="val" id="poseTV">0.05</span></label>
+  <button id="snapBtn">SNAP</button>
+  <button id="pauseBtn">Pause</button>
+  <button id="poseBtn">Pose ON</button>
+</div>
+
+<div id="main" style="display:none; flex-direction:row;">
+  <div id="monitor">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="monitorCanvas"></canvas>
+  </div>
+  <div id="visual">
+    <canvas id="visCanvas"></canvas>
+    <div id="countdown"></div>
+    <div id="snapOverlay">
+      <button id="saveClean">Save Clean</button>
+      <button id="saveCamera">Save + Camera</button>
+      <button id="resumeBtn">Resume</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { PoseLandmarker, FilesetResolver, DrawingUtils } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+
+// --- State ---
+let poseLandmarker = null;
+let lastDetectTime = -1;
+let allPoses = [];
+let paused = false;
+let frozen = false;
+let poseVisible = true;
+let prevLandmarks = null;
+
+// --- Controls ---
+const $ = id => document.getElementById(id);
+const ctrl = {
+  get numPoses() { return +$('numPoses').value; },
+  get hold() { return +$('hold').value; },
+  get fade() { return +$('fade').value; },
+  get ptMin() { return +$('ptMin').value; },
+  get ptMax() { return +$('ptMax').value; },
+  get connMax() { return +$('connMax').value; },
+  get connDist() { return +$('connDist').value; },
+  get color() { return $('color').value; },
+  get trail() { return +$('trail').value; },
+  get poseT() { return +$('poseT').value; },
+};
+
+// Bind slider value displays
+for (const id of ['hold','fade','ptMin','ptMax','connMax','connDist','trail','poseT']) {
+  const el = $(id);
+  const vEl = $(id + 'V');
+  el.addEventListener('input', () => {
+    vEl.textContent = ['connDist','trail','poseT'].includes(id) ? (+el.value).toFixed(2) :
+                      ['hold','fade'].includes(id) ? (+el.value).toFixed(1) : el.value;
+  });
+}
+
+// --- Elements ---
+const video = $('video');
+const monCtx = $('monitorCanvas').getContext('2d');
+const visCanvas = $('visCanvas');
+const visCtx = visCanvas.getContext('2d');
+
+// --- BroadcastChannel ---
+const bc = new BroadcastChannel('constellation');
+let lastBroadcast = 0;
+
+function broadcastState() {
+  const now = performance.now();
+  if (now - lastBroadcast < 33.3) return; // 30fps throttle
+  lastBroadcast = now;
+  bc.postMessage({
+    type: 'state',
+    constellations: constellations.map(c => ({
+      points: c.points.map(p => ({ x: p.x, y: p.y })),
+      connections: c.connections.map(cn => ({ a: cn.a, b: cn.b })),
+      birthTime: c.birthTime,
+    })),
+    settings: {
+      hold: ctrl.hold,
+      fade: ctrl.fade,
+      color: ctrl.color,
+      trail: ctrl.trail,
+    },
+    paused,
+    frozen,
+    timestamp: now,
+  });
+}
+
+// --- Skeleton connections ---
+const POSE_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,7],[0,4],[4,5],[5,6],[6,8],
+  [9,10],[11,12],[11,13],[13,15],[15,17],[15,19],[15,21],
+  [12,14],[14,16],[16,18],[16,20],[16,22],
+  [11,23],[12,24],[23,24],[23,25],[25,27],[27,29],[27,31],
+  [24,26],[26,28],[28,30],[28,32],
+];
+
+// --- Constellation logic ---
+let constellations = [];
+let starPool = [];
+
+function hexToRgb(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return { r, g, b };
+}
+
+function dist(a, b) {
+  return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+}
+
+function updateStarPool() {
+  starPool = [];
+  for (const pose of allPoses) {
+    if (!pose) continue;
+    for (const lm of pose) {
+      if (lm.visibility > 0.4) {
+        starPool.push({ x: lm.x, y: lm.y });
+      }
+    }
+  }
+}
+
+function spawnConstellation(now) {
+  if (starPool.length < ctrl.ptMin) return null;
+  const count = ctrl.ptMin + Math.floor(Math.random() * (ctrl.ptMax - ctrl.ptMin + 1));
+  const n = Math.min(count, starPool.length);
+
+  // Random subset via Fisher-Yates partial shuffle
+  const pool = [...starPool];
+  for (let i = pool.length - 1; i > pool.length - n - 1 && i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  const points = pool.slice(pool.length - n);
+
+  // Connect nearest neighbors
+  const connections = [];
+  const connDist = ctrl.connDist;
+  const connMax = ctrl.connMax;
+  const connCount = new Array(points.length).fill(0);
+
+  for (let i = 0; i < points.length; i++) {
+    // Find distances to all other points
+    const dists = [];
+    for (let j = 0; j < points.length; j++) {
+      if (i === j) continue;
+      dists.push({ j, d: dist(points[i], points[j]) });
+    }
+    dists.sort((a, b) => a.d - b.d);
+
+    for (const { j, d } of dists) {
+      if (connCount[i] >= connMax) break;
+      if (d > connDist) break;
+      if (connCount[j] >= connMax) continue;
+      // Avoid duplicate connections
+      const exists = connections.some(c => (c.a === i && c.b === j) || (c.a === j && c.b === i));
+      if (exists) continue;
+      connections.push({ a: i, b: j });
+      connCount[i]++;
+      connCount[j]++;
+    }
+  }
+
+  return { points, connections, birthTime: now };
+}
+
+// --- Velocity filter ---
+function filterByVelocity(newPoses) {
+  if (!prevLandmarks || !newPoses) {
+    prevLandmarks = newPoses ? newPoses.map(p => p ? [...p.map(l => ({...l}))] : null) : null;
+    return newPoses;
+  }
+  const threshold = ctrl.poseT;
+  const filtered = newPoses.map((pose, pi) => {
+    if (!pose || !prevLandmarks[pi]) return pose;
+    return pose.map((lm, li) => {
+      const prev = prevLandmarks[pi][li];
+      const dx = lm.x - prev.x;
+      const dy = lm.y - prev.y;
+      const v = Math.sqrt(dx * dx + dy * dy);
+      if (v < threshold) return { ...prev, visibility: lm.visibility };
+      return lm;
+    });
+  });
+  prevLandmarks = filtered.map(p => p ? [...p.map(l => ({...l}))] : null);
+  return filtered;
+}
+
+// --- Init MediaPipe ---
+async function initPose() {
+  const vision = await FilesetResolver.forVisionTasks(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+  );
+  poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+      delegate: 'GPU',
+    },
+    runningMode: 'VIDEO',
+    numPoses: ctrl.numPoses,
+  });
+}
+
+// Update numPoses when changed
+$('numPoses').addEventListener('change', async () => {
+  if (!poseLandmarker) return;
+  await poseLandmarker.setOptions({ numPoses: ctrl.numPoses });
+  prevLandmarks = null;
+});
+
+// --- Camera ---
+async function initCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: 640, height: 360, facingMode: 'user' },
+    audio: false,
+  });
+  video.srcObject = stream;
+  await new Promise(r => video.onloadeddata = r);
+}
+
+// --- Resize ---
+function resize() {
+  const mc = $('monitorCanvas');
+  mc.width = mc.clientWidth;
+  mc.height = mc.clientHeight;
+  visCanvas.width = visCanvas.clientWidth;
+  visCanvas.height = visCanvas.clientHeight;
+}
+window.addEventListener('resize', resize);
+
+// --- Draw monitor ---
+function drawMonitor() {
+  const mc = $('monitorCanvas');
+  const ctx = monCtx;
+  ctx.clearRect(0, 0, mc.width, mc.height);
+
+  if (!poseVisible || !allPoses.length) return;
+
+  // Scale from normalized to canvas
+  const sx = mc.width;
+  const sy = mc.height;
+
+  for (const pose of allPoses) {
+    if (!pose) continue;
+
+    // Draw connections
+    ctx.strokeStyle = 'rgba(0,200,0,0.5)';
+    ctx.lineWidth = 1.5;
+    for (const [a, b] of POSE_CONNECTIONS) {
+      const la = pose[a], lb = pose[b];
+      if (!la || !lb || la.visibility < 0.4 || lb.visibility < 0.4) continue;
+      ctx.beginPath();
+      ctx.moveTo(la.x * sx, la.y * sy);
+      ctx.lineTo(lb.x * sx, lb.y * sy);
+      ctx.stroke();
+    }
+
+    // Draw dots
+    for (const lm of pose) {
+      if (lm.visibility < 0.4) continue;
+      ctx.fillStyle = 'rgba(0,255,100,0.7)';
+      ctx.beginPath();
+      ctx.arc(lm.x * sx, lm.y * sy, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+// --- Draw constellation ---
+function drawConstellation(now) {
+  const w = visCanvas.width;
+  const h = visCanvas.height;
+
+  // Trail fade
+  const { r: br, g: bg, b: bb } = { r: 5, g: 5, b: 16 }; // #050510
+  visCtx.fillStyle = `rgba(${br},${bg},${bb},${ctrl.trail})`;
+  visCtx.fillRect(0, 0, w, h);
+
+  const { r, g, b } = hexToRgb(ctrl.color);
+  const holdMs = ctrl.hold * 1000;
+  const fadeMs = ctrl.fade * 1000;
+
+  for (let ci = constellations.length - 1; ci >= 0; ci--) {
+    const c = constellations[ci];
+    const age = now - c.birthTime;
+    const totalLife = holdMs + fadeMs;
+
+    if (age > totalLife) {
+      constellations.splice(ci, 1);
+      continue;
+    }
+
+    let alpha = 1;
+    if (age > holdMs) {
+      alpha = 1 - (age - holdMs) / fadeMs;
+    }
+
+    // Draw lines
+    visCtx.lineWidth = 0.8;
+    for (const conn of c.connections) {
+      const pa = c.points[conn.a];
+      const pb = c.points[conn.b];
+      visCtx.strokeStyle = `rgba(${r},${g},${b},${alpha * 0.4})`;
+      visCtx.beginPath();
+      visCtx.moveTo(pa.x * w, pa.y * h);
+      visCtx.lineTo(pb.x * w, pb.y * h);
+      visCtx.stroke();
+    }
+
+    // Draw dots
+    for (const p of c.points) {
+      visCtx.fillStyle = `rgba(${r},${g},${b},${alpha * 0.8})`;
+      visCtx.beginPath();
+      visCtx.arc(p.x * w, p.y * h, 2.5, 0, Math.PI * 2);
+      visCtx.fill();
+    }
+  }
+}
+
+// --- Spawn timer ---
+let lastSpawn = 0;
+
+// --- Main loop ---
+function loop(timestamp) {
+  requestAnimationFrame(loop);
+
+  // Detect poses
+  if (poseLandmarker && video.readyState >= 2) {
+    const t = performance.now();
+    if (t > lastDetectTime) {
+      lastDetectTime = t;
+      const result = poseLandmarker.detectForVideo(video, t);
+      let rawPoses = result.landmarks.map(lms =>
+        lms.map(l => ({ x: l.x, y: l.y, z: l.z, visibility: l.visibility }))
+      );
+      rawPoses = filterByVelocity(rawPoses);
+      allPoses = rawPoses;
+    }
+  }
+
+  updateStarPool();
+
+  const now = performance.now();
+
+  // Spawn new constellations
+  if (!paused && !frozen) {
+    const spawnInterval = (ctrl.hold + ctrl.fade) * 1000;
+    if (now - lastSpawn > spawnInterval * 0.6 || constellations.length === 0) {
+      const c = spawnConstellation(now);
+      if (c) {
+        constellations.push(c);
+        lastSpawn = now;
+      }
+    }
+  }
+
+  // If frozen, prevent constellations from aging by resetting birthTime
+  if (frozen) {
+    for (const c of constellations) {
+      c.birthTime = now - ctrl.hold * 500; // Keep at mid-hold
+    }
+  }
+
+  drawMonitor();
+  drawConstellation(now);
+  broadcastState();
+}
+
+// --- Pause ---
+$('pauseBtn').addEventListener('click', () => {
+  paused = !paused;
+  $('pauseBtn').textContent = paused ? 'Play' : 'Pause';
+  $('pauseBtn').classList.toggle('active', paused);
+});
+
+// --- Pose toggle ---
+$('poseBtn').addEventListener('click', () => {
+  poseVisible = !poseVisible;
+  $('poseBtn').textContent = poseVisible ? 'Pose ON' : 'Pose OFF';
+  $('poseBtn').classList.toggle('active', !poseVisible);
+});
+
+// --- SNAP ---
+$('snapBtn').addEventListener('click', async () => {
+  if (frozen) return;
+  const cd = $('countdown');
+  cd.style.display = 'flex';
+  for (const num of ['3', '2', '1']) {
+    cd.textContent = num;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  cd.style.display = 'none';
+
+  // Freeze
+  frozen = true;
+  paused = true;
+  $('snapOverlay').style.display = 'flex';
+});
+
+function saveImage(withCamera) {
+  const w = visCanvas.width;
+  const h = visCanvas.height;
+  const offscreen = document.createElement('canvas');
+  offscreen.width = w;
+  offscreen.height = h;
+  const ctx = offscreen.getContext('2d');
+
+  if (withCamera) {
+    // Draw camera feed scaled to visual canvas
+    ctx.globalAlpha = 0.3;
+    ctx.drawImage(video, 0, 0, w, h);
+    ctx.globalAlpha = 1;
+  }
+
+  // Draw constellation on top
+  ctx.drawImage(visCanvas, 0, 0);
+
+  const url = offscreen.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `constellation-${Date.now()}.png`;
+  a.click();
+}
+
+$('saveClean').addEventListener('click', () => saveImage(false));
+$('saveCamera').addEventListener('click', () => saveImage(true));
+$('resumeBtn').addEventListener('click', () => {
+  frozen = false;
+  paused = false;
+  $('pauseBtn').textContent = 'Pause';
+  $('pauseBtn').classList.remove('active');
+  $('snapOverlay').style.display = 'none';
+});
+
+// --- Start ---
+$('startScreen').addEventListener('click', async () => {
+  $('startScreen').style.display = 'none';
+  $('controls').style.display = 'flex';
+  $('main').style.display = 'flex';
+  resize();
+
+  // Fill canvas black initially
+  visCtx.fillStyle = '#050510';
+  visCtx.fillRect(0, 0, visCanvas.width, visCanvas.height);
+
+  await initCamera();
+  await initPose();
+  requestAnimationFrame(loop);
+});
+
+// --- Keyboard shortcuts ---
+document.addEventListener('keydown', e => {
+  if (e.key === ' ') { e.preventDefault(); $('pauseBtn').click(); }
+  if (e.key === 's' || e.key === 'S') { $('snapBtn').click(); }
+  if (e.key === 'p' || e.key === 'P') { $('poseBtn').click(); }
+  if (e.key === 'Escape' && frozen) { $('resumeBtn').click(); }
+});
+</script>
+</body>
+</html>
